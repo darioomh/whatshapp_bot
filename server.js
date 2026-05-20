@@ -1,6 +1,7 @@
 const express = require("express");
 const axios = require("axios");
 const Groq = require("groq-sdk");
+const nodemailer = require("nodemailer");
 require("dotenv").config();
 
 const processedMessages = new Map();
@@ -126,6 +127,34 @@ function wantsHumanAgent(message) {
   return HUMAN_KEYWORDS.some(k => lower.includes(k));
 }
 
+const transporter = nodemailer.createTransport({
+  host: process.env.SMTP_HOST || "smtp.gmail.com",
+  port: Number(process.env.SMTP_PORT) || 587,
+  secure: false,
+  auth: {
+    user: process.env.EMAIL_USER,
+    pass: process.env.EMAIL_PASS,
+  },
+});
+
+async function notifyByEmail(customerNumber, customerMessage) {
+  if (!process.env.EMAIL_USER || !process.env.EMAIL_ADMIN) return;
+
+  const text =
+    `Solicitud de atención humana\n\n` +
+    `Cliente: ${customerNumber}\n` +
+    `Mensaje: "${customerMessage}"\n` +
+    `Hora: ${new Date().toLocaleString("es-ES")}\n\n` +
+    `Responde desde Meta Business Suite → Inbox → WhatsApp`;
+
+  await transporter.sendMail({
+    from: process.env.EMAIL_USER,
+    to: process.env.EMAIL_ADMIN,
+    subject: "🔔 Solicitud de atención humana - MIDAS Gold",
+    text,
+  });
+}
+
 async function sendWhatsAppMessage(to, body) {
   await axios.post(
     `https://graph.facebook.com/v19.0/${process.env.PHONE_NUMBER_ID}/messages`,
@@ -201,6 +230,7 @@ app.post("/webhook", async (req, res) => {
 
     if (wantsHumanAgent(text)) {
       pausedCustomers.set(from, Date.now());
+      notifyByEmail(from, text).catch(e => console.error("Error email:", e.message));
       await sendWhatsAppMessage(
         from,
         "✅ *Has sido transferido a un asesor humano.*\n\n" +
