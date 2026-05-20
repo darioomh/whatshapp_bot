@@ -3,6 +3,8 @@ const axios = require("axios");
 const Groq = require("groq-sdk");
 require("dotenv").config();
 
+const processedMessages = new Map();
+
 const app = express();
 const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
 
@@ -168,50 +170,84 @@ app.post("/webhook", async (req, res) => {
 
     const message = value?.messages?.[0];
 
-    if (message && message.type === "text" && message.text?.body) {
-      const from = message.from;
-      const text = message.text.body;
+    if (!message || message.type !== "text" || !message.text?.body) {
+      return res.sendStatus(200);
+    }
 
-      console.log("Mensaje recibido:", text);
+    const from = message.from;
+    const text = message.text.body;
+    const messageId = message.id;
 
-      if (pausedCustomers.has(from)) {
-        return res.sendStatus(200);
+    if (from === process.env.PHONE_NUMBER_ID || from === process.env.YOUR_BOT_NUMBER) {
+      console.log("Ignorando mensaje del propio bot:", from);
+      return res.sendStatus(200);
+    }
+
+    if (processedMessages.has(messageId)) {
+      console.log("Mensaje ya procesado:", messageId);
+      return res.sendStatus(200);
+    }
+    processedMessages.set(messageId, Date.now());
+
+    const now = Date.now();
+    for (const [id, timestamp] of processedMessages) {
+      if (now - timestamp > 300000) {
+        processedMessages.delete(id);
       }
+    }
 
-      if (wantsHumanAgent(text)) {
-        pausedCustomers.add(from);
-        await notifyAdmin(from, text);
-        await sendWhatsAppMessage(
-          from,
-          "✅ *Has sido transferido a un asesor humano.*\n\n" +
-          "En breve recibirás atención personalizada. " +
-          "Si lo prefieres, contáctanos directamente:\n" +
-          "📞 +34 925 504 699\n📧 comercial@midasgold.es"
-        );
-        console.log("Cliente transferido a humano:", from);
-        return res.sendStatus(200);
-      }
+    console.log("Mensaje nuevo procesado:", { from, text, messageId });
 
+    if (pausedCustomers.has(from)) {
+      return res.sendStatus(200);
+    }
+
+    if (wantsHumanAgent(text)) {
+      pausedCustomers.add(from);
+      await notifyAdmin(from, text);
+      await sendWhatsAppMessage(
+        from,
+        "✅ *Has sido transferido a un asesor humano.*\n\n" +
+        "En breve recibirás atención personalizada. " +
+        "Si lo prefieres, contáctanos directamente:\n" +
+        "📞 +34 925 504 699\n📧 comercial@midasgold.es"
+      );
+      console.log("Cliente transferido a humano:", from);
+      return res.sendStatus(200);
+    }
+
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 10000);
+
+    let reply;
+    try {
       const completion = await groq.chat.completions.create({
         messages: [
           { role: "system", content: SYSTEM_PROMPT },
-          { role: "user",   content: text },
+          { role: "user", content: text },
         ],
-        model:       "llama-3.1-8b-instant",
+        model: "llama-3.1-8b-instant",
         temperature: 0.7,
-        max_tokens:  800,
+        max_tokens: 800,
+      }, {
+        signal: controller.signal
       });
 
-      const reply =
-        completion.choices[0]?.message?.content ||
+      reply = completion.choices[0]?.message?.content ||
         "Lo siento, no pude procesar tu mensaje. Por favor contáctanos en comercial@midasgold.es";
-
-      await sendWhatsAppMessage(from, reply);
+    } catch (groqError) {
+      clearTimeout(timeout);
+      console.error("Error en Groq:", groqError.message);
+      reply = "Estoy teniendo problemas técnicos. Por favor, intenta de nuevo en un momento o escríbenos a comercial@midasgold.es";
     }
+    clearTimeout(timeout);
+
+    await sendWhatsAppMessage(from, reply);
+    console.log("Respuesta enviada a:", from);
 
     res.sendStatus(200);
   } catch (err) {
-    console.error("Error:", err.response?.data || err.message);
+    console.error("Error crítico en webhook:", err.response?.data || err.message);
     res.sendStatus(500);
   }
 });
