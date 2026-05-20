@@ -19,7 +19,17 @@ const HUMAN_KEYWORDS = [
   "no entiendo", "no me sirve", "queja", "reclamacion",
 ];
 
-const pausedCustomers = new Set();
+const pausedCustomers = new Map();
+const PAUSE_DURATION = 24 * 60 * 60 * 1000;
+
+function isPaused(from) {
+  if (!pausedCustomers.has(from)) return false;
+  if (Date.now() - pausedCustomers.get(from) > PAUSE_DURATION) {
+    pausedCustomers.delete(from);
+    return false;
+  }
+  return true;
+}
 
 const CATALOGO = {
   general:     "https://midasgold.es/es/catalogo",
@@ -198,12 +208,12 @@ app.post("/webhook", async (req, res) => {
 
     console.log("Mensaje nuevo procesado:", { from, text, messageId });
 
-    if (pausedCustomers.has(from)) {
+    if (isPaused(from)) {
       return res.sendStatus(200);
     }
 
     if (wantsHumanAgent(text)) {
-      pausedCustomers.add(from);
+      pausedCustomers.set(from, Date.now());
       await notifyAdmin(from, text);
       await sendWhatsAppMessage(
         from,
