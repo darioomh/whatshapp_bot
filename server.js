@@ -144,19 +144,6 @@ async function sendWhatsAppMessage(to, body) {
   );
 }
 
-async function notifyAdmin(customerNumber, customerMessage) {
-  if (!process.env.ADMIN_WHATSAPP) return;
-
-  const alertMessage =
-    `🔔 *SOLICITUD DE ATENCIÓN HUMANA*\n\n` +
-    `👤 *Cliente:* ${customerNumber}\n` +
-    `💬 *Último mensaje:* "${customerMessage}"\n` +
-    `⏰ *Hora:* ${new Date().toLocaleString("es-ES")}\n\n` +
-    `Responde desde WhatsApp Business a este cliente.`;
-
-  await sendWhatsAppMessage(process.env.ADMIN_WHATSAPP, alertMessage);
-}
-
 app.get("/webhook", (req, res) => {
   const mode      = req.query["hub.mode"];
   const token     = req.query["hub.verify_token"];
@@ -214,7 +201,6 @@ app.post("/webhook", async (req, res) => {
 
     if (wantsHumanAgent(text)) {
       pausedCustomers.set(from, Date.now());
-      await notifyAdmin(from, text);
       await sendWhatsAppMessage(
         from,
         "✅ *Has sido transferido a un asesor humano.*\n\n" +
