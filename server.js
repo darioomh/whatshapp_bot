@@ -9,6 +9,15 @@ const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
 app.use(express.json());
 
 const VERIFY_TOKEN = "midas_verify";
+const HUMAN_KEYWORDS = [
+  "humano", "persona", "hablar", "agente", "atencion", "atencion",
+  "operador", "ayuda", "real", "persona real", "hablar contigo",
+  "no es un bot", "quiero hablar", "me atiende alguien", "asesor",
+  "que me ayude", "hablar con alguien", "quiero que me ayude",
+  "no entiendo", "no me sirve", "queja", "reclamacion",
+];
+
+const pausedCustomers = new Set();
 
 const CATALOGO = {
   general:     "https://midasgold.es/es/catalogo",
@@ -100,6 +109,42 @@ RESPUESTAS ESPECIALES:
 - Si piden precios → menciona el rango y redirige a la URL de la categoría.
 - Si saludan → saluda con el nombre MIDAS Gold y ofrece las 3 colecciones como opciones.`;
 
+function wantsHumanAgent(message) {
+  const lower = message.toLowerCase();
+  return HUMAN_KEYWORDS.some(k => lower.includes(k));
+}
+
+async function sendWhatsAppMessage(to, body) {
+  await axios.post(
+    `https://graph.facebook.com/v19.0/${process.env.PHONE_NUMBER_ID}/messages`,
+    {
+      messaging_product: "whatsapp",
+      to,
+      type: "text",
+      text: { body },
+    },
+    {
+      headers: {
+        Authorization: `Bearer ${process.env.WHATSAPP_TOKEN}`,
+        "Content-Type": "application/json",
+      },
+    }
+  );
+}
+
+async function notifyAdmin(customerNumber, customerMessage) {
+  if (!process.env.ADMIN_WHATSAPP) return;
+
+  const alertMessage =
+    `🔔 *SOLICITUD DE ATENCIÓN HUMANA*\n\n` +
+    `👤 *Cliente:* ${customerNumber}\n` +
+    `💬 *Último mensaje:* "${customerMessage}"\n` +
+    `⏰ *Hora:* ${new Date().toLocaleString("es-ES")}\n\n` +
+    `Responde desde WhatsApp Business a este cliente.`;
+
+  await sendWhatsAppMessage(process.env.ADMIN_WHATSAPP, alertMessage);
+}
+
 app.get("/webhook", (req, res) => {
   const mode      = req.query["hub.mode"];
   const token     = req.query["hub.verify_token"];
@@ -129,6 +174,24 @@ app.post("/webhook", async (req, res) => {
 
       console.log("Mensaje recibido:", text);
 
+      if (pausedCustomers.has(from)) {
+        return res.sendStatus(200);
+      }
+
+      if (wantsHumanAgent(text)) {
+        pausedCustomers.add(from);
+        await notifyAdmin(from, text);
+        await sendWhatsAppMessage(
+          from,
+          "✅ *Has sido transferido a un asesor humano.*\n\n" +
+          "En breve recibirás atención personalizada. " +
+          "Si lo prefieres, contáctanos directamente:\n" +
+          "📞 +34 925 504 699\n📧 comercial@midasgold.es"
+        );
+        console.log("Cliente transferido a humano:", from);
+        return res.sendStatus(200);
+      }
+
       const completion = await groq.chat.completions.create({
         messages: [
           { role: "system", content: SYSTEM_PROMPT },
@@ -143,21 +206,7 @@ app.post("/webhook", async (req, res) => {
         completion.choices[0]?.message?.content ||
         "Lo siento, no pude procesar tu mensaje. Por favor contáctanos en comercial@midasgold.es";
 
-      await axios.post(
-        `https://graph.facebook.com/v19.0/${process.env.PHONE_NUMBER_ID}/messages`,
-        {
-          messaging_product: "whatsapp",
-          to:   from,
-          type: "text",
-          text: { body: reply },
-        },
-        {
-          headers: {
-            Authorization:  `Bearer ${process.env.WHATSAPP_TOKEN}`,
-            "Content-Type": "application/json",
-          },
-        }
-      );
+      await sendWhatsAppMessage(from, reply);
     }
 
     res.sendStatus(200);
