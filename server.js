@@ -129,8 +129,8 @@ function wantsHumanAgent(message) {
 
 const transporter = nodemailer.createTransport({
   host: process.env.SMTP_HOST || "smtp.gmail.com",
-  port: Number(process.env.SMTP_PORT) || 587,
-  secure: false,
+  port: Number(process.env.SMTP_PORT) || 465,
+  secure: true,
   auth: {
     user: process.env.EMAIL_USER,
     pass: process.env.EMAIL_PASS,
@@ -147,12 +147,17 @@ async function notifyByEmail(customerNumber, customerMessage) {
     `Hora: ${new Date().toLocaleString("es-ES")}\n\n` +
     `Responde desde Meta Business Suite → Inbox → WhatsApp`;
 
-  await transporter.sendMail({
-    from: process.env.EMAIL_USER,
-    to: process.env.EMAIL_ADMIN,
-    subject: "🔔 Solicitud de atención humana - MIDAS Gold",
-    text,
-  });
+  try {
+    const info = await transporter.sendMail({
+      from: process.env.EMAIL_USER,
+      to: process.env.EMAIL_ADMIN,
+      subject: "Solicitud de atención humana - MIDAS Gold",
+      text,
+    });
+    console.log("Email enviado:", info.messageId);
+  } catch (err) {
+    console.error("Error al enviar email:", err.message);
+  }
 }
 
 async function sendWhatsAppMessage(to, body) {
