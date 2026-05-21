@@ -2,9 +2,16 @@ const express = require("express");
 const axios = require("axios");
 const Groq = require("groq-sdk");
 const nodemailer = require("nodemailer");
+const low = require("lowdb");
+const FileSync = require("lowdb/adapters/FileSync");
 require("dotenv").config();
 
-const processedMessages = new Map();
+// Configuración de Base de Datos Local
+const adapter = new FileSync("db.json");
+const db = low(adapter);
+
+// Inicializar DB con valores por defecto
+db.defaults({ sessions: {}, processedMessages: {} }).write();
 
 const app = express();
 const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
@@ -20,13 +27,14 @@ const HUMAN_KEYWORDS = [
   "no entiendo", "no me sirve", "queja", "reclamacion",
 ];
 
-const pausedCustomers = new Map();
 const PAUSE_DURATION = 24 * 60 * 60 * 1000;
 
 function isPaused(from) {
-  if (!pausedCustomers.has(from)) return false;
-  if (Date.now() - pausedCustomers.get(from) > PAUSE_DURATION) {
-    pausedCustomers.delete(from);
+  const session = db.get(`sessions.${from}`).value();
+  if (!session || !session.pausedAt) return false;
+  
+  if (Date.now() - session.pausedAt > PAUSE_DURATION) {
+    db.set(`sessions.${from}.pausedAt`, null).write();
     return false;
   }
   return true;
@@ -66,61 +74,24 @@ const CATALOGO = {
 
 const SYSTEM_PROMPT = `Eres el asistente oficial de *MIDAS Gold* ✨, una joyería artesanal especializada en piezas únicas de oro, plata y el arte del damasquinado toledano.
 
-INSTRUCCIONES DE FORMATO (MUY IMPORTANTE):
-- Usa emojis relevantes para hacer los mensajes visuales y atractivos.
-- Usa *negrita* (asteriscos) para destacar nombres de productos, precios y secciones.
-- Usa listas con viñetas (guion) para mostrar categorías o productos.
-- Mantén un tono elegante, cálido y profesional.
-- Sé conciso pero completo.
-- Nunca uses markdown con # o ## (no funciona en WhatsApp).
+INSTRUCCIONES DE FORMATO:
+- Usa emojis relevantes.
+- Usa *negrita* para destacar productos y precios.
+- Usa listas con viñetas (-).
+- Tono elegante, cálido y profesional.
+- No uses markdown con # o ##.
 
-CATÁLOGO COMPLETO CON URLs:
-• Catálogo general: ${CATALOGO.general}
-• Tienda online: ${CATALOGO.tienda}
+CATÁLOGO:
+• General: ${CATALOGO.general}
+• Tienda: ${CATALOGO.tienda}
 
-💎 COLECCIÓN MUJER:
-- Pendientes → ${CATALOGO.mujer.pendientes}
-- Brazaletes → ${CATALOGO.mujer.brazaletes}
-- Colgantes → ${CATALOGO.mujer.colgantes}
-- Pulseras → ${CATALOGO.mujer.pulseras}
-- Relojes → ${CATALOGO.mujer.relojes}
-- Anillos → ${CATALOGO.mujer.anillos}
+💎 MUJER: Pendientes (${CATALOGO.mujer.pendientes}), Brazaletes (${CATALOGO.mujer.brazaletes}), Colgantes (${CATALOGO.mujer.colgantes}).
+👔 HOMBRE: Gemelos (${CATALOGO.hombre.gemelos}), Zippos (${CATALOGO.hombre.zippos}), Relojes (${CATALOGO.mujer.relojes}).
+🏠 HOME: Abrecartas (${CATALOGO.home.abrecartas}), Joyeros (${CATALOGO.home.joyeros}).
 
-👔 COLECCIÓN HOMBRE:
-- Gemelos → ${CATALOGO.hombre.gemelos}
-- Zippos → ${CATALOGO.hombre.zippos}
-- Corbateros → ${CATALOGO.hombre.corbateros}
-- Pulseras → ${CATALOGO.hombre.pulseras}
-- Llaveros → ${CATALOGO.hombre.llaveros}
-- Billeteros → ${CATALOGO.hombre.billeteros}
-
-🏠 COLECCIÓN HOME:
-- Abrecartas → ${CATALOGO.home.abrecartas}
-- Joyeros → ${CATALOGO.home.joyeros}
-- Platos Damasquinados → ${CATALOGO.home.platos}
-
-PRECIOS DE REFERENCIA (de productos reales en la web):
-- Brazalete fino damasquinado plata: 40,00 €
-- Pendientes damasquinado y cristal checo: desde 29,00 €
-- Pendientes hoja damasquinados plata: 13,00 €
-- Pendientes gota damasquinados plata: 16,00 €
-- Brazalete damasquinado y cristal checo: desde 78,00 €
-- Pendientes diamante damasquinados oro: 21,50 €
-- Envío gratuito desde 60€
-
-CONTACTO Y CITAS:
-📍 C/ Río Jarama, 132 - Nave 3.05 - 45007 - Toledo, España
+CONTACTO:
 📞 +34 925 504 699 / +34 917 692 759
-📧 comercial@midasgold.es
-🌐 ${CATALOGO.contacto}
-
-Para agendar cita con un asesor, siempre proporciona el teléfono y el correo.
-
-RESPUESTAS ESPECIALES:
-- Si piden el catálogo completo → muestra las 3 colecciones con sus URLs y emojis.
-- Si piden regalos → sugiere categorías relevantes con URLs directas.
-- Si piden precios → menciona el rango y redirige a la URL de la categoría.
-- Si saludan → saluda con el nombre MIDAS Gold y ofrece las 3 colecciones como opciones.`;
+📧 comercial@midasgold.es`;
 
 function wantsHumanAgent(message) {
   const lower = message.toLowerCase();
@@ -131,158 +102,167 @@ const transporter = nodemailer.createTransport({
   host: process.env.SMTP_HOST || "smtp.gmail.com",
   port: Number(process.env.SMTP_PORT) || 465,
   secure: true,
+  pool: true,
   auth: {
     user: process.env.EMAIL_USER,
     pass: process.env.EMAIL_PASS,
   },
+  connectionTimeout: 15000,
+  greetingTimeout: 15000,
+  socketTimeout: 30000,
 });
+
+transporter.verify().catch(err => console.error("Error SMTP:", err.message));
 
 async function notifyByEmail(customerNumber, customerMessage) {
   if (!process.env.EMAIL_USER || !process.env.EMAIL_ADMIN) return;
 
-  const text =
-    `Solicitud de atención humana\n\n` +
-    `Cliente: ${customerNumber}\n` +
-    `Mensaje: "${customerMessage}"\n` +
-    `Hora: ${new Date().toLocaleString("es-ES")}\n\n` +
-    `Responde desde Meta Business Suite → Inbox → WhatsApp`;
+  const html = `
+    <!DOCTYPE html>
+    <html lang="es">
+    <head>
+      <meta charset="UTF-8">
+      <style>
+        body { font-family: Arial, sans-serif; line-height: 1.6; color: #333; }
+        .container { max-width: 600px; margin: 20px auto; border: 1px solid #e0e0e0; border-radius: 8px; overflow: hidden; }
+        .header { background-color: #000; padding: 20px; text-align: center; }
+        .header img { max-width: 150px; }
+        .content { padding: 30px; }
+        .title { color: #d4af37; font-size: 22px; font-weight: bold; text-align: center; border-bottom: 2px solid #d4af37; padding-bottom: 10px; }
+        .field { margin-top: 15px; }
+        .value { background-color: #f9f9f9; padding: 10px; border-left: 4px solid #d4af37; }
+        .button { background-color: #25d366; color: white; padding: 12px 25px; text-decoration: none; border-radius: 5px; display: inline-block; margin-top: 20px; }
+      </style>
+    </head>
+    <body>
+      <div class="container">
+        <div class="header"><img src="cid:logo_midas" alt="MIDAS Gold"></div>
+        <div class="content">
+          <div class="title">Solicitud de Atención Humana</div>
+          <div class="field"><strong>Cliente:</strong> +${customerNumber.replace(/\D/g, '')}</div>
+          <div class="field"><strong>Mensaje:</strong> <div class="value">"${customerMessage}"</div></div>
+          <div class="field"><strong>Fecha:</strong> ${new Date().toLocaleString("es-ES")}</div>
+          <div style="text-align:center"><a href="https://business.facebook.com/latest/inbox/all" class="button">Abrir Meta Business Suite</a></div>
+        </div>
+      </div>
+    </body>
+    </html>
+  `;
 
   try {
-    const info = await transporter.sendMail({
-      from: process.env.EMAIL_USER,
+    await transporter.sendMail({
+      from: `"Bot MIDAS Gold" <${process.env.EMAIL_USER}>`,
       to: process.env.EMAIL_ADMIN,
-      subject: "Solicitud de atención humana - MIDAS Gold",
-      text,
+      subject: `⚠️ Atención Humana Solicitada: ${customerNumber}`,
+      html,
+      attachments: [{ filename: 'logo.png', path: './logo.png', cid: 'logo_midas' }]
     });
-    console.log("Email enviado:", info.messageId);
-  } catch (err) {
-    console.error("Error al enviar email:", err.message);
+  } catch (error) {
+    console.error("Error al enviar email:", error);
   }
 }
 
 async function sendWhatsAppMessage(to, body) {
-  await axios.post(
-    `https://graph.facebook.com/v19.0/${process.env.PHONE_NUMBER_ID}/messages`,
-    {
-      messaging_product: "whatsapp",
-      to,
-      type: "text",
-      text: { body },
-    },
-    {
-      headers: {
-        Authorization: `Bearer ${process.env.WHATSAPP_TOKEN}`,
-        "Content-Type": "application/json",
-      },
-    }
-  );
+  try {
+    await axios.post(
+      `https://graph.facebook.com/v19.0/${process.env.PHONE_NUMBER_ID}/messages`,
+      { messaging_product: "whatsapp", to, type: "text", text: { body } },
+      { headers: { Authorization: `Bearer ${process.env.WHATSAPP_TOKEN}`, "Content-Type": "application/json" } }
+    );
+  } catch (e) {
+    console.error("Error WhatsApp:", e.response?.data || e.message);
+  }
 }
 
 app.get("/webhook", (req, res) => {
-  const mode      = req.query["hub.mode"];
-  const token     = req.query["hub.verify_token"];
-  const challenge = req.query["hub.challenge"];
-
-  if (mode && token === VERIFY_TOKEN) {
-    console.log("Webhook verificado");
-    return res.status(200).send(challenge);
+  if (req.query["hub.mode"] && req.query["hub.verify_token"] === VERIFY_TOKEN) {
+    return res.status(200).send(req.query["hub.challenge"]);
   }
-
   res.sendStatus(403);
 });
 
 app.post("/webhook", async (req, res) => {
   try {
     const value = req.body.entry?.[0]?.changes?.[0]?.value;
-
-    if (value?.statuses) {
-      return res.sendStatus(200);
-    }
-
     const message = value?.messages?.[0];
 
-    if (!message || message.type !== "text" || !message.text?.body) {
-      return res.sendStatus(200);
-    }
+    if (!message || message.type !== "text" || !message.text?.body) return res.sendStatus(200);
 
     const from = message.from;
     const text = message.text.body;
     const messageId = message.id;
 
-    if (from === process.env.PHONE_NUMBER_ID || from === process.env.YOUR_BOT_NUMBER) {
-      console.log("Ignorando mensaje del propio bot:", from);
-      return res.sendStatus(200);
-    }
+    // Evitar duplicados
+    if (db.get(`processedMessages.${messageId}`).value()) return res.sendStatus(200);
+    db.set(`processedMessages.${messageId}`, Date.now()).write();
 
-    if (processedMessages.has(messageId)) {
-      console.log("Mensaje ya procesado:", messageId);
-      return res.sendStatus(200);
-    }
-    processedMessages.set(messageId, Date.now());
-
+    // Limpiar mensajes antiguos de la DB (más de 1 hora)
+    const oldMessages = db.get("processedMessages").value();
     const now = Date.now();
-    for (const [id, timestamp] of processedMessages) {
-      if (now - timestamp > 300000) {
-        processedMessages.delete(id);
-      }
+    for (const id in oldMessages) {
+      if (now - oldMessages[id] > 3600000) db.unset(`processedMessages.${id}`).write();
     }
 
-    console.log("Mensaje nuevo procesado:", { from, text, messageId });
+    if (isPaused(from)) return res.sendStatus(200);
 
-    if (isPaused(from)) {
-      return res.sendStatus(200);
-    }
+    let session = db.get(`sessions.${from}`).value() || { history: [], lastActive: 0, waitingForChoice: false };
 
+    // Si el cliente pide ayuda humana
     if (wantsHumanAgent(text)) {
-      pausedCustomers.set(from, Date.now());
-      notifyByEmail(from, text).catch(e => console.error("Error email:", e.message));
-      await sendWhatsAppMessage(
-        from,
-        "✅ *Has sido transferido a un asesor humano.*\n\n" +
-        "En breve recibirás atención personalizada. " +
-        "Si lo prefieres, contáctanos directamente:\n" +
-        "📞 +34 925 504 699\n📧 comercial@midasgold.es"
-      );
-      console.log("Cliente transferido a humano:", from);
+      db.set(`sessions.${from}.pausedAt`, Date.now()).write();
+      await notifyByEmail(from, text);
+      await sendWhatsAppMessage(from, "✅ *Has sido transferido a un asesor humano.* En breve te atenderemos.\n📞 +34 925 504 699");
       return res.sendStatus(200);
     }
 
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 10000);
-
-    let reply;
-    try {
-      const completion = await groq.chat.completions.create({
-        messages: [
-          { role: "system", content: SYSTEM_PROMPT },
-          { role: "user", content: text },
-        ],
-        model: "llama-3.1-8b-instant",
-        temperature: 0.7,
-        max_tokens: 800,
-      }, {
-        signal: controller.signal
-      });
-
-      reply = completion.choices[0]?.message?.content ||
-        "Lo siento, no pude procesar tu mensaje. Por favor contáctanos en comercial@midasgold.es";
-    } catch (groqError) {
-      clearTimeout(timeout);
-      console.error("Error en Groq:", groqError.message);
-      reply = "Estoy teniendo problemas técnicos. Por favor, intenta de nuevo en un momento o escríbenos a comercial@midasgold.es";
+    // Lógica de "Deseas continuar" (si han pasado más de 12 horas)
+    const TWELVE_HOURS = 12 * 60 * 60 * 1000;
+    if (session.lastActive > 0 && (now - session.lastActive > TWELVE_HOURS) && !session.waitingForChoice) {
+      session.waitingForChoice = true;
+      db.set(`sessions.${from}`, session).write();
+      await sendWhatsAppMessage(from, "✨ *¡Hola de nuevo!* He visto que estuvimos hablando hace un tiempo.\n\n¿Qué prefieres hacer?\n1️⃣ *Continuar* donde lo dejamos.\n2️⃣ Iniciar una *nueva consulta*.");
+      return res.sendStatus(200);
     }
-    clearTimeout(timeout);
+
+    // Manejar la elección del usuario
+    if (session.waitingForChoice) {
+      if (text.includes("1") || text.toLowerCase().includes("continuar")) {
+        session.waitingForChoice = false;
+        await sendWhatsAppMessage(from, "¡Perfecto! Continuamos. ¿En qué puedo ayudarte ahora?");
+      } else if (text.includes("2") || text.toLowerCase().includes("nueva")) {
+        session.history = [];
+        session.waitingForChoice = false;
+        await sendWhatsAppMessage(from, "Entendido. He reiniciado nuestra conversación. ¿Cómo puedo ayudarte hoy? ✨");
+      } else {
+        await sendWhatsAppMessage(from, "Por favor, elige una opción:\n1️⃣ Continuar\n2️⃣ Nueva consulta");
+      }
+      db.set(`sessions.${from}`, session).write();
+      return res.sendStatus(200);
+    }
+
+    // Construir historial para Groq
+    const history = session.history.slice(-10).map(m => ({ role: m.role, content: m.content }));
+    history.push({ role: "user", content: text });
+
+    const completion = await groq.chat.completions.create({
+      messages: [{ role: "system", content: SYSTEM_PROMPT }, ...history],
+      model: "llama-3.1-8b-instant",
+    });
+
+    const reply = completion.choices[0]?.message?.content || "Lo siento, ¿puedes repetir?";
+    
+    // Guardar en historial
+    session.history.push({ role: "user", content: text, time: now });
+    session.history.push({ role: "assistant", content: reply, time: now });
+    session.lastActive = now;
+    db.set(`sessions.${from}`, session).write();
 
     await sendWhatsAppMessage(from, reply);
-    console.log("Respuesta enviada a:", from);
-
     res.sendStatus(200);
   } catch (err) {
-    console.error("Error crítico en webhook:", err.response?.data || err.message);
+    console.error("Error crítico:", err.message);
     res.sendStatus(500);
   }
 });
 
-app.listen(3000, () => {
-  console.log("Servidor MIDAS Gold corriendo en puerto 3000");
-});
+app.listen(3000, () => console.log("Servidor MIDAS Gold listo en puerto 3000"));
