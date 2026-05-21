@@ -99,20 +99,14 @@ function wantsHumanAgent(message) {
 }
 
 const transporter = nodemailer.createTransport({
-  host: process.env.SMTP_HOST || "smtp.gmail.com",
-  port: Number(process.env.SMTP_PORT) || 587,
-  secure: false, // false para puerto 587 (STARTTLS)
-  pool: true,
+  service: 'gmail',
   auth: {
     user: process.env.EMAIL_USER,
     pass: process.env.EMAIL_PASS,
   },
-  connectionTimeout: 15000,
-  greetingTimeout: 15000,
+  connectionTimeout: 20000, // Aumentado a 20s
+  greetingTimeout: 20000,
   socketTimeout: 30000,
-  tls: {
-    rejectUnauthorized: false // Ayuda con problemas de red en algunos entornos
-  }
 });
 
 transporter.verify().catch(err => console.error("Error SMTP:", err.message));
